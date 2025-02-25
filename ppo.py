@@ -1,3 +1,4 @@
+import torch
 from network import FeedForwardNetwork
 
 class PPO:
@@ -15,6 +16,23 @@ class PPO:
         self.actor = FeedForwardNetwork(input_size=self.obs_dim, output_size=self.act_dim)
         self.critic = FeedForwardNetwork(input_size=self.obs_dim, output_size=1)
     
+    def get_action(self, obs):
+        """
+        By outputting a mean and using a standard deviation to create a covariance matrix, the network effectively defines a probability distribution over actions. Sampling from this distribution allows the agent to explore actions around the mean, rather than always taking the same action. This stochasticity is crucial for exploration, 
+        """
+        
+        obs = torch.from_numpy(obs).float()
+        mean = self.actor(obs)
+        # Multivariate Normal Distribution
+        cov_var = torch.full(size=(self.act_dim,), fill_value=0.5)
+        # Create the covariance matrix
+        cov_mat = torch.diag(cov_var)
+        dist = torch.distributions.MultivariateNormal(mean, cov_mat)
+        action = dist.sample()
+        log_prob = dist.log_prob(action)
+        
+        # detach the action and log_prob from the computational graph to avoid backpropagation
+        return action.detach().numpy(), log_prob.detach()
     
     def rollout(self):
         # Batch data collection
@@ -42,7 +60,7 @@ class PPO:
                 # Get the action and log probability
                 t += 1
                 batch_obs.append(obs)
-                action , log_prob = self.actor.predict(obs)
+                action , log_prob = self.get_action(obs)
                 batch_log_probs.append(log_prob)
                 
                 # Step in the environment
