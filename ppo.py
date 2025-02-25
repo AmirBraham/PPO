@@ -72,14 +72,33 @@ class PPO:
             batch_lens.append(ep_t+1)
             batch_rews.append(ep_rews)
                 
-                
+        # Reshape data as tensors in the shape specified before returning
+        batch_obs = torch.tensor(batch_obs, dtype=torch.float)
+        batch_acts = torch.tensor(batch_acts, dtype=torch.float)
+        batch_log_probs = torch.tensor(batch_log_probs, dtype=torch.float)
+        # ALG STEP #4
+        batch_rtgs = self.compute_rtgs(batch_rews)
+        # Return the batch data
+        return batch_obs, batch_acts, batch_log_probs, batch_rtgs, batch_lens        
             
-        
-  
+    def compute_rtgs(self, batch_rews):
+        # The rewards-to-go (rtg) per episode per batch to return.
+        # The shape will be (num timesteps per episode)
+        batch_rtgs = []
+        # Iterate through each episode backwards to maintain same order
+        # in batch_rtgs
+        gamma = 0.98
+        for ep_rews in reversed(batch_rews):
+            discounted_reward = 0  # The discounted reward so far
+            for rew in reversed(ep_rews):
+                discounted_reward = rew + discounted_reward * gamma
+                batch_rtgs.insert(0, discounted_reward)
+        # Convert the rewards-to-go into a tensor
+        batch_rtgs = torch.tensor(batch_rtgs, dtype=torch.float)
+        return batch_rtgs
+    
     def learn(self,total_timesteps):
         timesteps = 0
         while t < timesteps: # ALG STEP 2
             # Step 3 : Collect set of trajectories
-            
-            
-        
+            batch_obs, batch_acts, batch_log_probs, batch_rtgs, batch_lens = self.rollout()
