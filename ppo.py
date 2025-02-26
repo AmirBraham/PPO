@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 from network import FeedForwardNetwork
-from torch.distributions import MultivariateNormal
+from torch.distributions import Normal
 import gymnasium as gym
 import matplotlib.pyplot as plt
 
@@ -11,11 +11,11 @@ class PPO:
         
         # Hyperparameters
         self.timesteps_per_batch = 4800
-        self.max_timesteps_per_episode = 1600
+        self.max_timesteps_per_episode = 200
         self.clip = 0.2
         self.num_updates_per_iteration = 5
-        self.gamma = 0.95
-        self.lr = 0.005  # Updated learning rate
+        self.gamma = 0.98
+        self.lr = 0.001  # Updated learning rate
         
         # Environment dimensions
         self.obs_dim = env.observation_space.shape[0]
@@ -25,23 +25,20 @@ class PPO:
         self.actor = FeedForwardNetwork(input_size=self.obs_dim, output_size=self.act_dim)
         self.critic = FeedForwardNetwork(input_size=self.obs_dim, output_size=1)
         
-        # Optimizers
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=self.lr)
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=self.lr)
+        # Replace covariance matrix with learnable log standard deviation
+        self.log_std = torch.nn.Parameter(torch.zeros(1, self.act_dim))
         
-        # Covariance matrix (fixed initialization, no extra batch dimension)
-        self.cov_var = torch.full((self.act_dim,), 0.5)
-        self.cov_mat = torch.diag(self.cov_var)  # Shape: (act_dim, act_dim)
+        # Update optimizers to include log_std
+        self.actor_optimizer = torch.optim.Adam(list(self.actor.parameters()) + [self.log_std], lr=self.lr)
+        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=self.lr)
     
     def get_action(self, obs):
-        # Add batch dimension rather than transposing
-        obs_tensor = torch.from_numpy(obs).float().unsqueeze(0)  # Shape: (1, obs_dim)
-        mean = self.actor(obs_tensor)  # Shape: (1, act_dim)
-        # MultivariateNormal can automatically broadcast the (act_dim, act_dim) covariance to batch size 1
-        dist = MultivariateNormal(mean, self.cov_mat)
-        action = dist.sample()  # Shape: (1, act_dim)
-        log_prob = dist.log_prob(action)
-        # Remove batch dimension before returning
+        obs_tensor = torch.from_numpy(obs).float().unsqueeze(0)
+        mean = self.actor(obs_tensor)
+        std = torch.exp(self.log_std)
+        dist = Normal(mean, std)
+        action = dist.sample()
+        log_prob = dist.log_prob(action).sum(dim=1)
         return action.squeeze(0).detach().numpy(), log_prob.squeeze(0).detach()
     
     def rollout(self, render=False):
@@ -97,14 +94,12 @@ class PPO:
         return torch.tensor(batch_rtgs, dtype=torch.float)
     
     def evaluate(self, batch_obs, batch_acts):
-        # Evaluate critic value and current policy's log probability for a batch
         V = self.critic(batch_obs).squeeze()
         mean = self.actor(batch_obs)
-        # Expand covariance matrix to match the batch size
-        batch_size = mean.shape[0]
-        cov_mat = self.cov_mat.expand(batch_size, self.act_dim, self.act_dim)
-        dist = MultivariateNormal(mean, covariance_matrix=cov_mat)
-        return V, dist.log_prob(batch_acts)
+        std = torch.exp(self.log_std).expand_as(mean)  # Match batch size
+        dist = Normal(mean, std)
+        log_probs = dist.log_prob(batch_acts).sum(dim=1)
+        return V, log_probs
     
     def learn(self, total_timesteps):
         timesteps = 0
@@ -165,7 +160,7 @@ if __name__ == "__main__":
     # To see a real-time window, you might set render_mode to 'human'
     env = gym.make('Pendulum-v1', render_mode='rgb_array')
     model = PPO(env)
-    model.learn(1000000)
+    model.learn(2000000)
     
     # After training, test the trained policy with rendering.
-    model.test(episodes=3)
+    model.test(episodes=5)
