@@ -9,7 +9,7 @@ class PPO:
     def __init__(self, env):
         self.env = env
         
-        # Hyperparameters (added missing ones)
+        # Hyperparameters
         self.timesteps_per_batch = 4800
         self.max_timesteps_per_episode = 1600
         self.clip = 0.2
@@ -29,18 +29,20 @@ class PPO:
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=self.lr)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=self.lr)
         
-        # Covariance matrix (fixed initialization)
+        # Covariance matrix (fixed initialization, no extra batch dimension)
         self.cov_var = torch.full((self.act_dim,), 0.5)
-        self.cov_mat = torch.diag(self.cov_var).unsqueeze(0)  # Add batch dimension
+        self.cov_mat = torch.diag(self.cov_var)  # Shape: (act_dim, act_dim)
     
     def get_action(self, obs):
-        obs = torch.from_numpy(obs).float()
-        
-        mean = self.actor(obs.T)
+        # Add batch dimension rather than transposing
+        obs_tensor = torch.from_numpy(obs).float().unsqueeze(0)  # Shape: (1, obs_dim)
+        mean = self.actor(obs_tensor)  # Shape: (1, act_dim)
+        # MultivariateNormal can automatically broadcast the (act_dim, act_dim) covariance to batch size 1
         dist = MultivariateNormal(mean, self.cov_mat)
-        action = dist.sample()
+        action = dist.sample()  # Shape: (1, act_dim)
         log_prob = dist.log_prob(action)
-        return action.detach().numpy(), log_prob.detach()
+        # Remove batch dimension before returning
+        return action.squeeze(0).detach().numpy(), log_prob.squeeze(0).detach()
     
     def rollout(self, render=False):
         batch_obs, batch_acts, batch_log_probs, batch_rews, batch_lens = [], [], [], [], []
@@ -53,8 +55,10 @@ class PPO:
             for ep_t in range(self.max_timesteps_per_episode):
                 t += 1
                 if render:
-                    self.env.render()  # Render if requested
-
+                    # For environments with render_mode 'rgb_array', you may need to display the returned image.
+                    rendered = self.env.render()
+                    # For example, you could use plt.imshow(rendered) if desired.
+                    
                 batch_obs.append(obs)
                 action, log_prob = self.get_action(obs)
                 obs, rew, terminated, truncated, _ = self.env.step(action)
@@ -80,18 +84,26 @@ class PPO:
 
 
     def compute_rtgs(self, batch_rews):
+        # Process each episode's rewards separately to ensure proper ordering
         batch_rtgs = []
-        for ep_rews in reversed(batch_rews):
+        for ep_rews in batch_rews:
+            discounted_rewards = []
             discounted_reward = 0
+            # Process rewards in reverse for each episode
             for rew in reversed(ep_rews):
-                discounted_reward = rew + discounted_reward * self.gamma
-                batch_rtgs.insert(0, discounted_reward)
+                discounted_reward = rew + self.gamma * discounted_reward
+                discounted_rewards.insert(0, discounted_reward)
+            batch_rtgs.extend(discounted_rewards)
         return torch.tensor(batch_rtgs, dtype=torch.float)
     
     def evaluate(self, batch_obs, batch_acts):
+        # Evaluate critic value and current policy's log probability for a batch
         V = self.critic(batch_obs).squeeze()
         mean = self.actor(batch_obs)
-        dist = MultivariateNormal(mean, self.cov_mat)
+        # Expand covariance matrix to match the batch size
+        batch_size = mean.shape[0]
+        cov_mat = self.cov_mat.expand(batch_size, self.act_dim, self.act_dim)
+        dist = MultivariateNormal(mean, covariance_matrix=cov_mat)
         return V, dist.log_prob(batch_acts)
     
     def learn(self, total_timesteps):
@@ -120,7 +132,7 @@ class PPO:
                 surr2 = torch.clamp(ratios, 1 - self.clip, 1 + self.clip) * A_k
 
                 self.actor_optimizer.zero_grad()
-                (-torch.min(surr1, surr2)).mean().backward(retain_graph=True)
+                (-torch.min(surr1, surr2)).mean().backward()
                 self.actor_optimizer.step()
 
                 self.critic_optimizer.zero_grad()
@@ -140,14 +152,18 @@ class PPO:
             done = False
             total_reward = 0
             while not done:
-                self.env.render()  # This will open a window (if supported) to show the environment
+                # Render the environment. For 'rgb_array' render_mode, you may need to process the image.
+                rendered = self.env.render()
+                # Optionally, display the rendered frame if needed.
                 action, _ = self.get_action(obs)
                 obs, rew, terminated, truncated, _ = self.env.step(action)
                 total_reward += rew
                 done = terminated or truncated
             print(f"Test Episode {ep+1} Reward: {total_reward}")
+
 if __name__ == "__main__":
-    env = gym.make('Pendulum-v1',render_mode='rgb_array')
+    # To see a real-time window, you might set render_mode to 'human'
+    env = gym.make('Pendulum-v1', render_mode='rgb_array')
     model = PPO(env)
     model.learn(1000000)
     
