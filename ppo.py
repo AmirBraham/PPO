@@ -2,7 +2,8 @@ import torch
 import torch.nn.functional as F
 from network import FeedForwardNetwork
 from torch.distributions import MultivariateNormal
-import gymnasium as gym  # Changed from gym to gymnasium
+import gymnasium as gym
+import matplotlib.pyplot as plt
 
 class PPO:
     def __init__(self, env):
@@ -41,35 +42,42 @@ class PPO:
         log_prob = dist.log_prob(action)
         return action.detach().numpy(), log_prob.detach()
     
-    def rollout(self):
+    def rollout(self, render=False):
         batch_obs, batch_acts, batch_log_probs, batch_rews, batch_lens = [], [], [], [], []
+        ep_rewards = []  # Total reward per episode
         t = 0
-        
+
         while t < self.timesteps_per_batch:
             obs, _ = self.env.reset()
-            done, ep_rews = False, []
-            
+            ep_rews = []
             for ep_t in range(self.max_timesteps_per_episode):
                 t += 1
+                if render:
+                    self.env.render()  # Render if requested
+
                 batch_obs.append(obs)
                 action, log_prob = self.get_action(obs)
                 obs, rew, terminated, truncated, _ = self.env.step(action)
-                
+
                 batch_acts.append(action)
                 batch_log_probs.append(log_prob)
                 ep_rews.append(float(rew))
-                
+
                 if terminated or truncated or t >= self.timesteps_per_batch:
                     break
-                    
+
             batch_lens.append(len(ep_rews))
             batch_rews.append(ep_rews)
-        
-        # Convert to tensors
-        batch_obs = torch.tensor(batch_obs, dtype=torch.float)
-        batch_acts = torch.tensor(batch_acts, dtype=torch.float)
-        batch_log_probs = torch.tensor(batch_log_probs, dtype=torch.float)
-        return batch_obs, batch_acts, batch_log_probs, self.compute_rtgs(batch_rews), batch_lens
+            ep_rewards.append(sum(ep_rews))  # Store total reward for this episode
+
+        # Compute the reward-to-go for every time step across episodes
+        return (torch.tensor(batch_obs, dtype=torch.float),
+                torch.tensor(batch_acts, dtype=torch.float),
+                torch.tensor(batch_log_probs, dtype=torch.float),
+                self.compute_rtgs(batch_rews),
+                batch_lens,
+                ep_rewards)
+
 
     def compute_rtgs(self, batch_rews):
         batch_rtgs = []
@@ -88,9 +96,16 @@ class PPO:
     
     def learn(self, total_timesteps):
         timesteps = 0
+        all_episode_rewards = []  # Store rewards for every episode during training
+
         while timesteps < total_timesteps:
-            batch_obs, batch_acts, batch_log_probs, batch_rtgs, _ = self.rollout()
-            timesteps += len(batch_obs)  # More accurate count
+            batch_obs, batch_acts, batch_log_probs, batch_rtgs, batch_lens, ep_rewards = self.rollout()
+            timesteps += len(batch_obs)  # Update the total timesteps seen
+            
+            # Log average reward for this rollout
+            avg_reward = sum(ep_rewards) / len(ep_rewards)
+            print(f"Average Reward this iteration: {avg_reward:.2f}")
+            all_episode_rewards.extend(ep_rewards)
             
             # Advantage calculation
             V, _ = self.evaluate(batch_obs, batch_acts)
@@ -100,20 +115,41 @@ class PPO:
             # Update networks
             for _ in range(self.num_updates_per_iteration):
                 V, curr_log_probs = self.evaluate(batch_obs, batch_acts)
-                
                 ratios = torch.exp(curr_log_probs - batch_log_probs)
                 surr1 = ratios * A_k
-                surr2 = torch.clamp(ratios, 1-self.clip, 1+self.clip) * A_k
-                
+                surr2 = torch.clamp(ratios, 1 - self.clip, 1 + self.clip) * A_k
+
                 self.actor_optimizer.zero_grad()
                 (-torch.min(surr1, surr2)).mean().backward(retain_graph=True)
                 self.actor_optimizer.step()
-                
+
                 self.critic_optimizer.zero_grad()
                 F.mse_loss(V, batch_rtgs).backward()
                 self.critic_optimizer.step()
 
+        # After training, plot the reward curve over episodes
+        plt.plot(all_episode_rewards)
+        plt.xlabel("Episode")
+        plt.ylabel("Total Reward")
+        plt.title("Training Reward over Episodes")
+        plt.show()
+
+    def test(self, episodes=5):
+        for ep in range(episodes):
+            obs, _ = self.env.reset()
+            done = False
+            total_reward = 0
+            while not done:
+                self.env.render()  # This will open a window (if supported) to show the environment
+                action, _ = self.get_action(obs)
+                obs, rew, terminated, truncated, _ = self.env.step(action)
+                total_reward += rew
+                done = terminated or truncated
+            print(f"Test Episode {ep+1} Reward: {total_reward}")
 if __name__ == "__main__":
-    env = gym.make('Pendulum-v1')
+    env = gym.make('Pendulum-v1',render_mode='rgb_array')
     model = PPO(env)
-    model.learn(10000)
+    model.learn(1000000)
+    
+    # After training, test the trained policy with rendering.
+    model.test(episodes=3)
